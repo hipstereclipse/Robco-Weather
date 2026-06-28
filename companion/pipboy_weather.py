@@ -23,8 +23,10 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shutil
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -44,15 +46,28 @@ KP_AURORA_LAT = [66.5, 64.5, 62.4, 60.4, 58.3, 56.3, 54.2, 52.2, 50.1, 48.1]
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "weather_config.json")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEVICE_JSON_LIMIT = 7000
 
-APP_INSTALL_FILES = [
-    (os.path.join(PROJECT_ROOT, "pipboy", "APPS", "WEATHER.JS"),
-     os.path.join("APPS", "WEATHER.JS")),
-    (os.path.join(PROJECT_ROOT, "pipboy", "APPINFO", "WEATHER.info"),
-     os.path.join("APPINFO", "WEATHER.info")),
-    (os.path.join(PROJECT_ROOT, "pipboy", "APPINFO", "WEATHER.IMG"),
-     os.path.join("APPINFO", "WEATHER.IMG")),
+# Each device app file: where it lives inside an app-source tree (parts under
+# the source root) and where it must land on the SD card (parts under <SD>).
+APP_FILES = [
+    (("pipboy", "APPS", "WEATHER.JS"),       ("APPS", "WEATHER.JS")),
+    (("pipboy", "APPINFO", "WEATHER.info"),  ("APPINFO", "WEATHER.info")),
+    (("pipboy", "APPINFO", "WEATHER.IMG"),   ("APPINFO", "WEATHER.IMG")),
 ]
+
+# Where "install latest" pulls the app files from. The slug is auto-detected
+# from this checkout's git remote when possible, with this as the fallback.
+GITHUB_DEFAULT_SLUG = "hipstereclipse/Robco-Weather"
+GITHUB_BRANCH = "main"
+
+# SD-relative paths an install can leave behind, used when cleaning up /
+# uninstalling: the app files plus every WEATHER.JSON variant the device app
+# looks for (see PATHS in pipboy/APPS/WEATHER.JS).
+APP_FILE_REL = [os.path.join(*sd_parts) for _, sd_parts in APP_FILES]
+DATA_FILE_REL = [os.path.join("USER", "WEATHER.JSON"),
+                 "WEATHER.JSON",
+                 os.path.join("USER", "WEATHER.json")]
 
 # WMO weather interpretation codes -> short description
 WMO = {
@@ -119,6 +134,8 @@ def load_config():
     cfg.setdefault("locations", list(DEFAULT_LOCATIONS))
     cfg.setdefault("units", "F")            # F or C
     cfg.setdefault("sd_path", "")           # SD card root, e.g. E:\ or /Volumes/PIPBOY
+    cfg.setdefault("app_source", "local")   # "local" folder or "github" latest
+    cfg.setdefault("app_source_dir", "")    # local app build folder ("" = bundled)
     return cfg
 
 
@@ -333,7 +350,7 @@ def build_payload(cfg):
     units = cfg["units"]
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    print("  > fetching space weather ...")
+    print("  > fetching NOAA SWPC space weather ...")
     space, kp_peak = fetch_space()
 
     locations = []
@@ -371,31 +388,153 @@ def write_payload(cfg, payload):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"))
-    print("\n  > wrote %d location(s) -> %s" % (len(payload["locations"]), out_path))
+    size = os.path.getsize(out_path)
+    print("\n  > wrote %d location(s), %d bytes -> %s"
+          % (len(payload["locations"]), size, out_path))
+    if size > DEVICE_JSON_LIMIT:
+        print("    ! cache is large for the Pip-Boy app; remove locations and sync again")
     if not (cfg.get("sd_path") or "").strip():
         print("    (no SD path set - copy this file to <SD>/USER/WEATHER.JSON,")
         print("     or set one with menu option [5] / --sd)")
 
 
-def install_app_files(sd_path):
+def repo_slug():
+    """Best-effort 'owner/repo' from this checkout's git remote, else default."""
+    try:
+        with open(os.path.join(PROJECT_ROOT, ".git", "config"), "r",
+                  encoding="utf-8") as f:
+            m = re.search(r"github\.com[:/]+([^/\s]+/[^/\s]+?)(?:\.git)?\s", f.read())
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return GITHUB_DEFAULT_SLUG
+
+
+def github_raw_base(branch=GITHUB_BRANCH):
+    return "https://raw.githubusercontent.com/%s/%s" % (repo_slug(), branch)
+
+
+def find_app_files(source_dir):
+    """Locate the device app files inside a local folder.
+
+    Accepts the project layout (<root>/pipboy/APPS/WEATHER.JS), the on-SD app
+    layout (<root>/APPS/WEATHER.JS), or the files sitting directly in <root>.
+    Returns [(abs_src, sd_rel_path)]; raises if any file is missing.
+    """
+    root = os.path.abspath(os.path.expanduser((source_dir or "").strip()))
+    if not os.path.isdir(root):
+        raise FileNotFoundError("App source folder not found: %s" % root)
+    found, missing = [], []
+    for repo_parts, sd_parts in APP_FILES:
+        name = repo_parts[-1]
+        candidates = [os.path.join(root, *repo_parts),
+                      os.path.join(root, *sd_parts),
+                      os.path.join(root, name)]
+        src = next((c for c in candidates if os.path.isfile(c)), None)
+        if src:
+            found.append((src, os.path.join(*sd_parts)))
+        else:
+            missing.append(name)
+    if missing:
+        raise FileNotFoundError(
+            "App source folder %s is missing: %s" % (root, ", ".join(missing)))
+    return found
+
+
+def download_app_files(branch=GITHUB_BRANCH):
+    """Download the latest device app files from GitHub into a temp folder.
+
+    Returns (files, tmpdir) where files is [(abs_src, sd_rel_path)]. The caller
+    must remove tmpdir once the files have been installed.
+    """
+    base = github_raw_base(branch)
+    tmp = tempfile.mkdtemp(prefix="pipboy_app_")
+    print("  > source: latest from github.com/%s (%s)" % (repo_slug(), branch))
+    files = []
+    for repo_parts, sd_parts in APP_FILES:
+        url = base + "/" + "/".join(repo_parts)
+        dest = os.path.join(tmp, *sd_parts)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        req = urllib.request.Request(url, headers={"User-Agent": "PipBoyWeather/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        with open(dest, "wb") as f:
+            f.write(data)
+        print("  > downloaded %s (%d bytes)" % (repo_parts[-1], len(data)))
+        files.append((dest, os.path.join(*sd_parts)))
+    return files, tmp
+
+
+def install_app_files(sd_path, files=None):
+    """Copy device app files onto the SD card.
+
+    `files` is [(abs_src, sd_rel_path)] from find_app_files / download_app_files;
+    when omitted the bundled checkout is used. Returns
+    [(dest, sd_rel, status, size)] where status is new / updated / unchanged.
+    """
     sd = (sd_path or "").strip()
     if not sd:
         raise ValueError("Set the SD card root before installing app files.")
     sd = os.path.abspath(os.path.expanduser(sd))
     if not os.path.isdir(sd):
         raise FileNotFoundError("SD card root not found: %s" % sd)
+    if files is None:
+        files = find_app_files(PROJECT_ROOT)
 
-    copied = []
-    for src, rel in APP_INSTALL_FILES:
-        if not os.path.isfile(src):
-            raise FileNotFoundError("Packaged app file not found: %s" % src)
-
-    for src, rel in APP_INSTALL_FILES:
+    results = []
+    for src, rel in files:
+        with open(src, "rb") as f:
+            data = f.read()
         dest = os.path.join(sd, rel)
+        status = "new"
+        if os.path.isfile(dest):
+            try:
+                with open(dest, "rb") as f:
+                    status = "unchanged" if f.read() == data else "updated"
+            except Exception:
+                status = "updated"
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copy2(src, dest)
-        copied.append(dest)
-    return copied
+        results.append((dest, rel, status, len(data)))
+    return results
+
+
+def uninstall_app_files(sd_path, remove_data=True):
+    """Remove a previous install's files from the SD card.
+
+    Deletes the app files and, when `remove_data` is set, every cached
+    WEATHER.JSON variant the device app looks for. Shared folders
+    (APPS/APPINFO/USER) are left in place since other apps may use them.
+    Returns [(path, status)] where status is removed / absent / "error: ...".
+    """
+    sd = (sd_path or "").strip()
+    if not sd:
+        raise ValueError("Set the SD card root before cleaning up.")
+    sd = os.path.abspath(os.path.expanduser(sd))
+    if not os.path.isdir(sd):
+        raise FileNotFoundError("SD card root not found: %s" % sd)
+
+    rels = list(APP_FILE_REL)
+    if remove_data:
+        rels += DATA_FILE_REL
+
+    results, seen = [], set()
+    for rel in rels:
+        dest = os.path.join(sd, rel)
+        key = os.path.normcase(os.path.abspath(dest))  # dedupe FAT case-variants
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.isfile(dest):
+            try:
+                os.remove(dest)
+                results.append((dest, "removed"))
+            except OSError as e:
+                results.append((dest, "error: %s" % e))
+        else:
+            results.append((dest, "absent"))
+    return results
 
 
 def do_fetch(cfg):

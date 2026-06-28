@@ -50,27 +50,32 @@ through the normal `ITEMS` behavior.
 
 ## Views
 
-### Current
+The app uses three RobCo-style terminal tabs: `ATMOS`, `5-DAY`, and `SOLAR`.
+Each tab is rendered as a monochrome phosphor screen with framed terminal
+panels, site IDs, scanline masking, and compact instrument readouts.
 
-The `CURRENT` view shows:
+### ATMOS
+
+The `ATMOS` view shows:
 
 - Location and region.
 - Weather icon.
 - Current temperature and unit.
 - Condition description.
+- Today's forecast high/low and rain chance.
 - Apparent temperature.
 - Wind speed and direction.
 - Humidity.
-- UV index labeled as `RAD (UV)` for flavor.
+- UV index labeled as `RAD UV` for flavor.
 - Observed timestamp.
 - Compact solar activity line when space-weather data exists.
 
 If aurora is possible or likely for the selected location, the solar line also
 shows the aurora status.
 
-### Forecast
+### 5-DAY
 
-The `FORECAST` view shows a 5-day grid:
+The `5-DAY` view shows a 5-day terminal buffer:
 
 - Day label.
 - Weather icon.
@@ -79,13 +84,13 @@ The `FORECAST` view shows a 5-day grid:
 
 The companion currently writes five forecast days.
 
-### Space WX
+### SOLAR
 
-The `SPACE WX` view shows:
+The `SOLAR` view shows:
 
 - Latest flare class.
 - NOAA R-scale, S-scale, and G-scale.
-- Current planetary Kp.
+- Current planetary Kp and the forecast peak Kp.
 - NOAA geomagnetic text.
 - 3-day Kp forecast graph.
 - Per-location aurora threshold line.
@@ -105,8 +110,8 @@ By default, data older than 12 hours is stale:
 var STALE_HOURS = 12;
 ```
 
-When stale, the app shows a blinking warning banner and the footer switches
-from `UPD` to `! STALE`.
+When stale, the header's left label is replaced with a `! DATA <age> OLD - SYNC`
+warning and the footer switches from `UPD` to `!`.
 
 Change `STALE_HOURS` in `WEATHER.JS` if you want a different threshold.
 
@@ -115,6 +120,12 @@ Change `STALE_HOURS` in `WEATHER.JS` if you want a different threshold.
 The app is designed for a landscape screen around 480 by 320 pixels. It reads
 `getWidth()` and `getHeight()` at runtime so it can adapt to small firmware
 differences, but the layout is tuned for the Pip-Boy 3000.
+
+The Pip-Boy glass has rounded corners that clip pixels near each corner. The
+header and footer rows are therefore inset horizontally by `CORN` (28 px) and
+nudged a few pixels off the top/bottom edge so their text clears the curve. If
+your unit's corners are more aggressively rounded and text still clips, increase
+`CORN` near the top of `WEATHER.JS`.
 
 The app resolves the graphics object defensively:
 

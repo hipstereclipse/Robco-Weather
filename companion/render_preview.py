@@ -20,7 +20,7 @@ import os
 import re
 import sys
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(HERE, "..", "previews")
@@ -29,10 +29,14 @@ DATA = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "sample", 
 # logical screen - the Pip-Boy 3000 app runs LANDSCAPE (~480x320 usable)
 LW, LH = 480, 320
 S = 2  # supersample factor
+CORN = 28      # horizontal inset for the top/bottom rows so the rounded
+               # display corners do not clip the header/footer text
+R_SCREEN = 22  # screen corner radius in logical px (the rounded glass)
 
-BG    = (5, 16, 9)
-FG    = (74, 255, 122)
-DIM   = (40, 120, 64)
+BG    = (1, 16, 7)
+FG    = (26, 255, 128)
+HOT   = (166, 255, 205)
+DIM   = (39, 121, 71)
 AMBER = (255, 182, 66)
 
 FONT_CANDIDATES = [
@@ -180,42 +184,68 @@ def hr(g, y):
     g.line(12, y, LW - 12, y)
 
 
-def header(g, data, loc_i, stale=False):
+def pad_hex(n):
+    return "0x%04X" % max(0, int(n))
+
+
+def box(g, x0, y0, x1, y1, label):
+    g.rect(x0, y0, x1, y1)
+    if label:
+        g.frect(x0 + 7, y0 - 1, x0 + 19 + len(label) * 7, y0 + 8, fill=BG)
+        g.text(" " + label + " ", x0 + 9, y0 - 1, F_TINY, fill=FG)
+
+
+def gauge(g, x, y, w, value, max_value):
+    g.rect(x, y, x + w, y + 6, fill=DIM)
+    try:
+        fill = max(0, min(w - 2, round((w - 2) * float(value) / max_value)))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return
+    if fill > 0:
+        g.frect(x + 1, y + 1, x + fill, y + 5, fill=FG)
+
+
+def header(g, data, loc_i, stale=False, age="27H"):
     n = len(data["locations"])
-    if not stale:
-        g.text("PIP-OS WEATHER MONITOR", 12, 4, F_TINY)
-    g.text("[%d/%d]" % (loc_i + 1, n), LW - 12, 4, F_TINY, ax=1)
+    if stale:
+        g.text("! CACHE %s OLD - SYNC" % age, CORN, 6, F_TINY, fill=HOT)
+    else:
+        g.text("ROBCO INDUSTRIES (TM) TERMLINK", CORN, 6, F_TINY)
+    g.text("ATMOS [%d/%d]" % (loc_i + 1, n), LW - CORN, 6, F_TINY, ax=1)
     hr(g, 18)
 
 
 def footer(g, data, stale=False):
-    y = LH - 14
+    y = LH - 16
     hr(g, y - 4)
-    g.text("WHEEL:LOC  THUMB:VIEW  ITEMS:EXIT", 12, y, F_TINY)
+    g.text("WHEEL:SITE  THUMB:PAGE  ITEMS:EXIT", CORN, y, F_TINY)
     stamp = data.get("generated", "")[5:]
-    g.text(("! STALE " if stale else "UPD ") + stamp, LW - 12, y, F_TINY,
-           ax=1, fill=AMBER if stale else FG)
+    g.text(("! " if stale else "UPD ") + stamp, LW - CORN, y, F_TINY,
+           ax=1, fill=HOT if stale else FG)
 
 
-def title(g, loc):
-    g.text(loc.get("name", "?"), LW / 2, 18, F_HEAD, ax=0, bold=True)
+def title(g, loc, loc_i=0):
+    g.text(loc.get("name", "?").upper(), CORN, 24, F_SMALL, ax=-1, bold=True)
     if loc.get("region"):
-        g.text(loc["region"], LW / 2, 42, F_TINY, ax=0, fill=DIM)
+        g.text(loc["region"].upper(), CORN, 43, F_TINY, ax=-1, fill=DIM)
+    g.text("SITE " + pad_hex(0xA100 + loc_i * 0x23), LW - CORN, 43, F_TINY,
+           ax=1, fill=DIM)
 
 
-TABS = ["CURRENT", "FORECAST", "SPACE WX"]
+TABS = ["ATMOS", "5-DAY", "SOLAR"]
 
 
 def tabs(g, active):
-    y = 56
+    y = 58
     bw = (LW - 24) / len(TABS)
     for i, t in enumerate(TABS):
         x0 = 12 + i * bw
-        col = AMBER if i == active else DIM
+        col = HOT if i == active else DIM
         if i == active:
-            g.rect(x0 + 3, y, x0 + bw - 3, y + 15, fill=AMBER)
-        g.text(t, x0 + bw / 2, y + 7, F_TINY, ax=0, ay=0, fill=col)
-    hr(g, 76)
+            g.rect(x0 + 3, y, x0 + bw - 3, y + 15, fill=HOT)
+        g.text(("> " if i == active else "  ") + t, x0 + bw / 2, y + 8,
+               F_TINY, ax=0, ay=0, fill=col)
+    hr(g, 77)
 
 
 def stat(g, label, value, x, y, w):
@@ -264,44 +294,55 @@ def solar_line(data, loc):
 def view_current(g, data, loc):
     c = loc.get("current", {})
     unit = data.get("units", {}).get("temp", "F")
-    midY = 150
-    # LEFT: icon + big temp
-    draw_icon(g, c.get("code", 0), 84, midY, 40, c.get("is_day", 1))
-    t = str(round(c.get("temp", 0)))
-    tx = 286
-    g.text(t, tx, midY, F_BIG, ax=1, ay=0, bold=True)
-    g.circle(tx + 5, midY - 14 + 4, 4)
-    g.text(unit, tx + 14, midY - 14 + 6, F_TINY, ax=-1, ay=0)
-    lcx = 150
-    g.text(c.get("desc", "--").upper(), lcx, midY + 52, F_SMALL, ax=0)
-    sl = solar_line(data, loc)
-    if sl:
-        g.text(sl, lcx, midY + 74, F_TINY, ax=0, fill=AMBER if "AURORA" in sl or
-               solar_active(data.get("space")) else FG)
-    # RIGHT: stat panel
-    g.line(300, 86, 300, 286)
-    xL, xR = 314, LW - 14
-    stat_row(g, "FEELS", str(round(c.get("feels", 0))) + unit, xL, xR, 116)
-    stat_row(g, "WIND", str(round(c.get("wind", 0))) + " " + c.get("dir", ""), xL, xR, 154)
-    stat_row(g, "HUMIDITY", str(round(c.get("humidity", 0))) + "%", xL, xR, 192)
-    stat_row(g, "RAD (UV)", str(round(c.get("uv", 0))), xL, xR, 230)
+    d0 = (loc.get("daily") or [{}])[0]
+    box(g, 14, 88, 236, 255, "LOCAL ATMOS")
+    box(g, 248, 88, LW - 14, 255, "INSTRUMENTS")
+
+    draw_icon(g, c.get("code", 0), 70, 135, 24, c.get("is_day", 1))
+    temp = str(round(c.get("temp", 0)))
+    g.text(temp, 118, 145, F_BIG, ax=-1, ay=0, bold=True)
+    g.circle(205 + 5, 124 + 4, 4)
+    g.text(unit, 205 + 14, 124 + 6, F_TINY, ax=-1, ay=0)
+
+    g.text("> CONDITION", 24, 184, F_TINY, fill=DIM)
+    g.text(c.get("desc", "--").upper()[:18], 24, 203, F_SMALL)
+    g.text("HI/LO %s/%s  RAIN %s%%" % (round(d0.get("hi", 0)),
+           round(d0.get("lo", 0)), round(d0.get("pop", 0))), 24, 228,
+           F_TINY, fill=FG)
     if c.get("time"):
-        g.text("OBSERVED " + c["time"][5:], (xL + xR) / 2, 258, F_TINY, ax=0, fill=DIM)
+        g.text("OBS " + c["time"][5:], 24, 243, F_TINY, fill=DIM)
+
+    xL, xR = 260, LW - 26
+    stat_row(g, "FEELS", str(round(c.get("feels", 0))) + unit, xL, xR, 112)
+    stat_row(g, "WIND", str(round(c.get("wind", 0))) + " " + c.get("dir", ""), xL, xR, 146)
+    stat_row(g, "HUMID", str(round(c.get("humidity", 0))) + "%", xL, xR, 180)
+    gauge(g, xL, 192, LW - 286, c.get("humidity"), 100)
+    stat_row(g, "RAD UV", str(round(c.get("uv", 0))), xL, xR, 220)
+    gauge(g, xL, 232, LW - 286, c.get("uv"), 11)
+
+    box(g, 14, 262, LW - 14, 286, "RELAY")
+    sl = solar_line(data, loc)
+    g.text((sl or "SOLAR RELAY UNAVAILABLE")[:58], 24, 274, F_TINY, ay=0,
+           fill=HOT if sl and ("AURORA" in sl or solar_active(data.get("space"))) else FG)
 
 
 def view_forecast(g, data, loc):
     days = loc.get("daily", [])[:5]
-    g.text("5-DAY FORECAST   (HI/LO  -  RAIN%)", LW / 2, 84, F_TINY, ax=0, fill=DIM)
+    box(g, 14, 88, LW - 14, 286, "FORECAST BUFFER")
+    g.text("5 ENTRIES  //  HI/LO  //  PRECIP CHANCE", 26, 103, F_TINY, fill=DIM)
     colW = (LW - 24) / 5
     for i, dday in enumerate(days):
         cx = 12 + colW * i + colW / 2
         if i > 0:
-            g.line(12 + colW * i, 104, 12 + colW * i, 262, fill=DIM)
-        g.text(dday.get("d", "?"), cx, 108, F_SMALL, ax=0)
-        draw_icon(g, dday.get("code", 0), cx, 162, 22, True)
+            g.line(12 + colW * i, 126, 12 + colW * i, 274, fill=DIM)
+        g.text(pad_hex(0xB000 + i * 0x10), cx, 119, F_TINY, ax=0, fill=DIM)
+        g.text(dday.get("d", "?"), cx, 138, F_SMALL, ax=0)
+        draw_icon(g, dday.get("code", 0), cx, 166, 17, True)
+        g.text(dday.get("desc", "--").upper()[:10], cx, 198, F_TINY, ax=0, fill=DIM)
         g.text("%s/%s" % (round(dday.get("hi", 0)), round(dday.get("lo", 0))),
-               cx, 202, F_SMALL, ax=0)
-        g.text(str(round(dday.get("pop", 0))) + "%", cx, 228, F_TINY, ax=0)
+               cx, 218, F_SMALL, ax=0)
+        g.text(str(round(dday.get("pop", 0))) + "%", cx, 246, F_TINY, ax=0)
+        gauge(g, 12 + colW * i + 13, 263, colW - 26, dday.get("pop"), 100)
 
 
 def kp_graph(g, sp, loc, x0, y0, x1, y1):
@@ -329,9 +370,9 @@ def kp_graph(g, sp, loc, x0, y0, x1, y1):
         ty = ky(needed)
         dx = x0
         while dx < x1:
-            g.line(dx, ty, dx + 3, ty, fill=AMBER)
+            g.line(dx, ty, dx + 3, ty, fill=HOT)
             dx += 6
-        g.text("AURORA Kp%d" % needed, x0 + 3, y0 - 1, F_TINY, fill=AMBER)
+        g.text("AURORA Kp%d" % needed, x0 + 3, y0 - 1, F_TINY, fill=HOT)
     for tk in sp.get("kpf_ticks", []):
         tx = x0 + tk["i"] * bw
         g.line(tx, base, tx, base + 3)
@@ -343,37 +384,27 @@ def view_space(g, data, loc):
     if not sp:
         g.text("NO SPACE WX DATA", LW / 2, LH / 2, F_SMALL, ax=0, ay=0)
         return
-    # LEFT column: solar scales + planetary Kp
-    g.text("SOLAR ACTIVITY", 14, 84, F_TINY, fill=DIM)
-    cw = (228 - 12) / 2
-    stat(g, "FLARE", sp.get("flare", "NONE"), 12, 104, cw)
-    stat(g, "R-SCALE", sp.get("r_scale", "R0"), 12 + cw, 104, cw)
-    stat(g, "S-SCALE", sp.get("s_scale", "S0"), 12, 150, cw)
-    stat(g, "G-SCALE", sp.get("g_scale", "G0"), 12 + cw, 150, cw)
-    g.text("PLANETARY Kp " + str(sp.get("kp_now", "--")), 14, 196, F_SMALL)
-    g.text((sp.get("g_text") or "FIELD QUIET").upper(), 14, 216, F_TINY, fill=DIM)
-    # RIGHT column: Kp graph
-    g.line(244, 84, 244, 248, fill=DIM)
-    g.text("Kp 3-DAY FORECAST", 252, 84, F_TINY, fill=DIM)
-    kp_graph(g, sp, loc, 274, 104, LW - 14, 226)
-    # BOTTOM: aurora verdict
-    hr(g, 250)
+    box(g, 14, 88, 238, 240, "ROBCO SOLAR RELAY")
+    box(g, 250, 88, LW - 14, 240, "KP BUFFER")
+    stat_row(g, "FLARE", sp.get("flare", "NONE"), 26, 226, 114)
+    stat_row(g, "R/S/G", "%s %s %s" % (sp.get("r_scale", "R0"),
+             sp.get("s_scale", "S0"), sp.get("g_scale", "G0")), 26, 226, 150)
+    stat_row(g, "KP NOW/PK", "%s / %s" % (sp.get("kp_now", "--"),
+             sp.get("kp_peak", "--")), 26, 226, 186)
+    g.text((sp.get("g_text") or "FIELD QUIET").upper()[:25], 26, 220, F_TINY, fill=DIM)
+    g.text("3-DAY PLANETARY K-INDEX", 262, 106, F_TINY, fill=DIM)
+    kp_graph(g, sp, loc, 286, 124, LW - 26, 222)
+
+    box(g, 14, 250, LW - 14, 294, "AURORA ESTIMATE")
     au = loc.get("aurora", {})
-    g.text("AURORA @ " + loc.get("name", ""), 14, 264, F_TINY, ax=-1, ay=0)
+    g.text("AURORA @ " + loc.get("name", "").upper()[:18], 24, 268, F_TINY,
+           ax=-1, ay=0)
     chance = au.get("chance", "UNKNOWN")
-    g.text(chance, LW - 14, 264, F_HEAD, ax=1, ay=0, bold=True,
-           fill=AMBER if chance in ("LIKELY", "POSSIBLE") else FG)
+    g.text(chance, LW - 24, 268, F_HEAD, ax=1, ay=0, bold=True,
+           fill=HOT if chance in ("LIKELY", "POSSIBLE") else FG)
     if "needed" in au:
         g.text("NEEDS Kp %s   PEAK Kp %s" % (au["needed"], au.get("maxkp", "?")),
-               14, 282, F_TINY, fill=DIM)
-
-
-def stale_banner(g, age="27H"):
-    x0, x1, y0, y1 = 10, LW - 58, 1, 15
-    g.rect(x0, y0, x1, y1, fill=AMBER)
-    g.rect(x0 + 1, y0 + 1, x1 - 1, y1 - 1, fill=AMBER)
-    g.text("! CACHED DATA %s OLD - SYNC SOON !" % age, (x0 + x1) / 2, (y0 + y1) / 2,
-           F_TINY, ax=0, ay=0, fill=AMBER)
+               24, 280, F_TINY, fill=FG)
 
 
 # --------------------------------------------------------------- compositing
@@ -383,6 +414,24 @@ def scanlines(img):
     for y in range(0, img.size[1], 3):
         d.line([(0, y), (img.size[0], y)], fill=(0, 0, 0, 60))
     return Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
+
+
+def vignette(img):
+    ov = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov)
+    w, h = img.size
+    steps = 32
+    for i in range(steps):
+        alpha = int(((steps - i) / steps) ** 2 * 90)
+        d.rectangle([i, i, w - 1 - i, h - 1 - i], outline=(0, 0, 0, alpha))
+    return Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
+
+
+def crt_effect(img):
+    glow = img.filter(ImageFilter.GaussianBlur(2.2))
+    img = Image.blend(img, glow, 0.18)
+    img = scanlines(img)
+    return vignette(img)
 
 
 def bezel(screen_img, caption):
@@ -398,7 +447,13 @@ def bezel(screen_img, caption):
            fill=DIM, anchor="ra")
     # inner screen recess
     d.rectangle([m - 4 * S, top - 4 * S, W - m + 4 * S, H - m + 4 * S], outline=DIM, width=S)
-    out.paste(screen_img, (m, top))
+    # round the screen corners so the preview matches the real rounded glass;
+    # corner pixels fall back to the bezel so clipped text is obvious
+    mask = Image.new("L", screen_img.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, screen_img.size[0] - 1, screen_img.size[1] - 1],
+        radius=R_SCREEN * S, fill=255)
+    out.paste(screen_img, (m, top), mask)
     return out
 
 
@@ -406,13 +461,11 @@ def render_device(data, loc_i, view, caption, stale=False):
     g = Screen()
     loc = data["locations"][loc_i]
     header(g, data, loc_i, stale=stale)
-    title(g, loc)
+    title(g, loc, loc_i)
     tabs(g, {"current": 0, "forecast": 1, "space": 2}[view])
     {"current": view_current, "forecast": view_forecast, "space": view_space}[view](g, data, loc)
-    if stale:
-        stale_banner(g)
     footer(g, data, stale=stale)
-    img = scanlines(g.img)
+    img = crt_effect(g.img)
     return bezel(img, caption)
 
 
@@ -434,8 +487,9 @@ def render_gui():
         t(" " + label + " ", x0 + 8, y0 - 11, 9, fill=DIMc)
 
     # header
-    t("▒ WEATHER COMPANION", 14, 12, 22, bold=True)
-    t("ROBCO INDUSTRIES (TM)  TERMINLINK", W / s - 14, 24, 9, fill=DIMc, anchor="ra")
+    t("ROBCO WEATHER RELAY", 14, 12, 22, bold=True)
+    t("ROBCO INDUSTRIES (TM) TERMLINK PROTOCOL", W / s - 14, 24, 9,
+      fill=DIMc, anchor="ra")
     d.rectangle([14 * s, 46 * s, (W / s - 14) * s, 48 * s], fill=EDGE)
 
     # saved locations panel
@@ -449,7 +503,7 @@ def render_gui():
         if i == 3:
             d.rectangle([18 * s, (yy - 2) * s, 414 * s, (yy + 16) * s], fill=SELc)
         t(" " + l, 20, yy, 11, fill=(AMB if i == 3 else GREEN))
-    for bx, lbl, col in [(18, "▲", GREEN), (52, "▼", GREEN), (360, "REMOVE", AMB)]:
+    for bx, lbl, col in [(18, "UP", GREEN), (58, "DN", GREEN), (360, "REMOVE", AMB)]:
         d.rectangle([bx * s, 300 * s, (bx + (60 if lbl == "REMOVE" else 28)) * s, 320 * s],
                     outline=EDGE, width=s)
         t(lbl, bx + 6, 304, 10, fill=col, bold=True)
@@ -469,26 +523,27 @@ def render_gui():
             d.rectangle([446 * s, (yy - 2) * s, 840 * s, (yy + 15) * s], fill=SELc)
         t("  " + r, 448, yy, 10, fill=(GREEN if i == 0 else DIMc))
     d.rectangle([720 * s, 300 * s, 840 * s, 320 * s], outline=EDGE, width=s)
-    t("ADD SELECTED  ←", 728, 304, 10, bold=True)
+    t("ADD SELECTED <-", 728, 304, 10, bold=True)
 
     # settings
     panel(14, 356, 846, 430, "SETTINGS")
     t("UNITS", 24, 372, 9, fill=DIMc)
-    t("(●) °F   ( ) °C", 70, 370, 11)
+    t("(X) DEG F   ( ) DEG C", 70, 370, 11)
     t("SD CARD ROOT", 230, 372, 9, fill=DIMc)
     d.rectangle([330 * s, 368 * s, 600 * s, 390 * s], outline=EDGE, width=s)
     t("E:\\", 338, 372, 11)
     d.rectangle([610 * s, 368 * s, 700 * s, 390 * s], outline=EDGE, width=s)
-    t("BROWSE…", 618, 372, 10, bold=True)
+    t("BROWSE...", 618, 372, 10, bold=True)
     t("OUTPUT  ->  E:\\USER\\WEATHER.JSON", 24, 402, 9, fill=DIMc)
 
     # fetch button
     d.rectangle([14 * s, 444 * s, 846 * s, 486 * s], outline=AMB, width=2 * s)
-    t("▶  FETCH & SYNC TO SD", W / (2 * s), 465, 22, fill=AMB, bold=True, anchor="mm")
+    t("FETCH WEATHER + SPACE WX", W / (2 * s), 465, 22, fill=AMB, bold=True,
+      anchor="mm")
 
     # terminal log
     panel(14, 500, 846, 600, "TERMINAL")
-    log = ["PIP-OS WEATHER COMPANION ONLINE.",
+    log = ["ROBCO WEATHER RELAY ONLINE.",
            "Data: Open-Meteo (weather) + NOAA SWPC (space weather).",
            "  > fetching space weather ...",
            "  > fetching NORTHERN OUTPOST ...",

@@ -28,7 +28,9 @@ renders the cached data in a Fallout 3 / New Vegas style interface.
    python companion/pipboy_weather_gui.py
    ```
 
-2. Select the SD card root and press `INSTALL APP FILES`. This copies:
+2. Add or reorder locations and choose `F` or `C`.
+
+3. Press `INSTALL / UPDATE DEVICE`, then select the SD card root. This copies:
 
    ```text
    pipboy/APPS/WEATHER.JS          -> APPS/WEATHER.JS
@@ -36,8 +38,8 @@ renders the cached data in a Fallout 3 / New Vegas style interface.
    pipboy/APPINFO/WEATHER.IMG      -> APPINFO/WEATHER.IMG
    ```
 
-3. Add or reorder locations, choose `F` or `C`, and press
-   `FETCH & SYNC DATA`.
+   It also downloads Open-Meteo weather and NOAA SWPC space weather, then
+   writes `USER/WEATHER.JSON`.
 
 4. Reboot the Pip-Boy. The app appears in `ITEMS > MISC` as `Weather`.
 

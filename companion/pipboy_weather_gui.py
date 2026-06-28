@@ -9,6 +9,7 @@
 # ============================================================================
 
 import os
+import shutil
 import sys
 import queue
 import threading
@@ -31,8 +32,10 @@ FTB  = ("Consolas", 11, "bold")
 FTSM = ("Consolas", 9)
 FTBIG = ("Consolas", 22, "bold")
 
-FETCH_LABEL = ">  FETCH & SYNC DATA"
-INSTALL_LABEL = "INSTALL APP FILES"
+FETCH_LABEL = "FETCH WEATHER + SPACE WX"
+FETCH_BUSY_LABEL = "FETCHING WEATHER + SPACE WX ..."
+INSTALL_LABEL = "INSTALL / UPDATE DEVICE"
+INSTALL_BUSY_LABEL = "INSTALLING + SYNCING ..."
 
 
 class App:
@@ -44,7 +47,7 @@ class App:
         self.fetching = False
         self.installing = False
 
-        root.title("PIP-OS // WEATHER COMPANION")
+        root.title("ROBCO TERMLINK // WEATHER COMPANION")
         root.configure(bg=BG)
         root.geometry("860x620")
         root.minsize(760, 560)
@@ -52,8 +55,9 @@ class App:
         self._build()
         self.refresh_locations()
         self.update_output_label()
-        self.log("PIP-OS WEATHER COMPANION ONLINE.")
-        self.log("Data: Open-Meteo (weather) + NOAA SWPC (space weather).")
+        self.update_source_state()
+        self.log("ROBCO WEATHER RELAY ONLINE.")
+        self.log("Sync includes Open-Meteo weather + NOAA SWPC space weather.")
         self.root.after(80, self._poll)
 
     # ---------------------------------------------------------------- styling
@@ -76,9 +80,9 @@ class App:
         # header ------------------------------------------------------------
         head = tk.Frame(self.root, bg=BG)
         head.pack(fill="x", padx=14, pady=(12, 4))
-        tk.Label(head, text="▒ WEATHER COMPANION", font=FTBIG,
+        tk.Label(head, text="ROBCO WEATHER RELAY", font=FTBIG,
                  bg=BG, fg=GREEN).pack(side="left")
-        tk.Label(head, text="ROBCO INDUSTRIES (TM)  TERMINLINK",
+        tk.Label(head, text="ROBCO INDUSTRIES (TM) TERMLINK PROTOCOL",
                  font=FTSM, bg=BG, fg=DIM).pack(side="right", pady=(10, 0))
         tk.Frame(self.root, bg=EDGE, height=2).pack(fill="x", padx=14)
 
@@ -97,8 +101,8 @@ class App:
         self.loc_list.pack(fill="both", expand=True)
         lb = tk.Frame(left, bg=BG)
         lb.pack(fill="x", pady=(8, 0))
-        self._btn(lb, "▲", lambda: self.move(-1)).pack(side="left")
-        self._btn(lb, "▼", lambda: self.move(1)).pack(side="left", padx=4)
+        self._btn(lb, "UP", lambda: self.move(-1)).pack(side="left")
+        self._btn(lb, "DN", lambda: self.move(1)).pack(side="left", padx=4)
         self._btn(lb, "REMOVE", self.remove_location, accent=True).pack(side="right")
 
         # right: add location ----------------------------------------------
@@ -118,7 +122,7 @@ class App:
                                       bd=0, highlightthickness=0, activestyle="none")
         self.result_list.pack(fill="both", expand=True, pady=(8, 0))
         self.result_list.bind("<Double-Button-1>", lambda ev: self.add_location())
-        self._btn(right, "ADD SELECTED  ←", self.add_location).pack(
+        self._btn(right, "ADD SELECTED <-", self.add_location).pack(
             anchor="e", pady=(8, 0))
 
         # settings ----------------------------------------------------------
@@ -128,7 +132,7 @@ class App:
         row.pack(fill="x")
         tk.Label(row, text="UNITS", font=FTSM, bg=BG, fg=DIM).pack(side="left")
         self.units_var = tk.StringVar(value=self.cfg.get("units", "F"))
-        for u, lbl in (("F", "°F"), ("C", "°C")):
+        for u, lbl in (("F", "DEG F"), ("C", "DEG C")):
             tk.Radiobutton(row, text=lbl, value=u, variable=self.units_var,
                            command=self.on_units, font=FT, bg=BG, fg=GREEN,
                            selectcolor=BG, activebackground=BG,
@@ -140,15 +144,43 @@ class App:
                  insertbackground=GREEN, bd=1, relief="solid",
                  highlightbackground=EDGE, width=24).pack(
             side="left", padx=6, ipady=2)
-        self._btn(row, "BROWSE…", self.browse_sd).pack(side="left")
+        self._btn(row, "BROWSE...", self.browse_sd).pack(side="left")
+
+        # app-file source: latest from git, or a local build folder ----------
+        srow = tk.Frame(setf, bg=BG)
+        srow.pack(fill="x", pady=(6, 0))
+        tk.Label(srow, text="APP SOURCE", font=FTSM, bg=BG, fg=DIM).pack(side="left")
+        self.source_var = tk.StringVar(value=self.cfg.get("app_source", "local"))
+        tk.Radiobutton(srow, text="LATEST (GIT)", value="github",
+                       variable=self.source_var, command=self.on_source, font=FTSM,
+                       bg=BG, fg=GREEN, selectcolor=BG, activebackground=BG,
+                       activeforeground=AMBER).pack(side="left", padx=(6, 0))
+        tk.Radiobutton(srow, text="LOCAL FOLDER", value="local",
+                       variable=self.source_var, command=self.on_source, font=FTSM,
+                       bg=BG, fg=GREEN, selectcolor=BG, activebackground=BG,
+                       activeforeground=AMBER).pack(side="left", padx=2)
+        self.appdir_var = tk.StringVar(value=self.cfg.get("app_source_dir", ""))
+        self.appdir_var.trace_add("write", lambda *a: self.update_source_state())
+        self.appdir_entry = tk.Entry(srow, textvariable=self.appdir_var, font=FT,
+                                     bg=BG, fg=GREEN, insertbackground=GREEN, bd=1,
+                                     relief="solid", highlightbackground=EDGE, width=20)
+        self.appdir_entry.pack(side="left", padx=6, ipady=2)
+        self.appdir_entry.bind("<FocusOut>", lambda ev: self.on_source())
+        self.appdir_btn = self._btn(srow, "BROWSE...", self.browse_appdir)
+        self.appdir_btn.pack(side="left")
+        self.src_lbl = tk.Label(setf, text="", font=FTSM, bg=BG, fg=DIM, anchor="w")
+        self.src_lbl.pack(fill="x", pady=(6, 0))
+
         self.out_lbl = tk.Label(setf, text="", font=FTSM, bg=BG, fg=DIM,
                                 anchor="w")
         self.out_lbl.pack(fill="x", pady=(6, 0))
+        tk.Label(setf, text="SYNC INCLUDES: OPEN-METEO WEATHER + NOAA SWPC SPACE WX",
+                 font=FTSM, bg=BG, fg=DIM, anchor="w").pack(fill="x")
 
         # sync + log --------------------------------------------------------
         act = tk.Frame(self.root, bg=BG)
         act.pack(fill="x", padx=14, pady=(8, 4))
-        self.fetch_btn = self._btn(act, "▶  FETCH & SYNC TO SD", self.fetch,
+        self.fetch_btn = self._btn(act, FETCH_LABEL, self.fetch,
                                    accent=True)
         self.fetch_btn.configure(font=FTBIG, padx=16, pady=8)
         self.fetch_btn.pack(fill="x")
@@ -232,41 +264,128 @@ class App:
         core.save_config(self.cfg)
         self.update_output_label()
 
+    def choose_sd(self, title):
+        opts = {"title": title}
+        initial = self.sd_var.get().strip()
+        if initial and os.path.isdir(initial):
+            opts["initialdir"] = initial
+        d = filedialog.askdirectory(**opts)
+        if not d:
+            return ""
+        self.sd_var.set(d)
+        self.cfg["sd_path"] = d
+        core.save_config(self.cfg)
+        self.update_output_label()
+        return d
+
     def browse_sd(self):
-        d = filedialog.askdirectory(title="Select Pip-Boy SD card root")
-        if d:
-            self.sd_var.set(d)
-            self.cfg["sd_path"] = d
-            core.save_config(self.cfg)
-            self.update_output_label()
+        self.choose_sd("Select Pip-Boy SD card root")
+
+    # ----------------------------------------------------------- app source
+    def on_source(self):
+        self.cfg["app_source"] = self.source_var.get()
+        self.cfg["app_source_dir"] = self.appdir_var.get().strip()
+        core.save_config(self.cfg)
+        self.update_source_state()
+
+    def browse_appdir(self):
+        init = self.appdir_var.get().strip() or core.PROJECT_ROOT
+        opts = {"title": "Select local app build folder"}
+        if os.path.isdir(init):
+            opts["initialdir"] = init
+        d = filedialog.askdirectory(**opts)
+        if not d:
+            return
+        self.source_var.set("local")
+        self.appdir_var.set(d)
+        self.on_source()
+
+    def update_source_state(self):
+        """Enable/disable the folder field and show the effective app source."""
+        local = self.source_var.get() != "github"
+        state = "normal" if local else "disabled"
+        try:
+            self.appdir_entry.configure(state=state)
+            self.appdir_btn.configure(state=state)
+        except (AttributeError, tk.TclError):
+            return
+        if not local:
+            self.src_lbl.configure(
+                text="APP FILES  <-  latest from github.com/%s (%s)"
+                     % (core.repo_slug(), core.GITHUB_BRANCH))
+        else:
+            d = self.appdir_var.get().strip()
+            self.src_lbl.configure(
+                text="APP FILES  <-  "
+                     + (d if d else "%s  (bundled)" % core.PROJECT_ROOT))
 
     # --------------------------------------------------------------- install
     def install_app(self):
         if self.fetching or self.installing:
             return
-        sd = self.sd_var.get().strip()
-        if not sd:
-            self.log("Set the SD card root before installing app files.")
+        if not self.cfg["locations"]:
+            self.log("No locations configured - add some first.")
             return
-        self.cfg["sd_path"] = sd
-        core.save_config(self.cfg)
-        self.update_output_label()
+        self.on_source()  # persist the current app-source selection
+        sd = self.choose_sd("Select Pip-Boy SD card root for install/update")
+        if not sd:
+            return
+        cfg = dict(self.cfg)
+        cfg["locations"] = list(self.cfg.get("locations", []))
+        cfg["sd_path"] = sd
+        cfg["app_source"] = self.source_var.get()
+        cfg["app_source_dir"] = self.appdir_var.get().strip()
         self.installing = True
-        self.install_btn.configure(state="disabled", text="INSTALLING ...")
+        self.install_btn.configure(state="disabled", text=INSTALL_BUSY_LABEL)
         self.fetch_btn.configure(state="disabled")
-        threading.Thread(target=self._install_worker, args=(sd,), daemon=True).start()
+        threading.Thread(target=self._install_worker, args=(cfg,), daemon=True).start()
 
-    def _install_worker(self, sd):
+    def _install_worker(self, cfg):
+        old = sys.stdout
+        sys.stdout = _QWriter(self.q)
+        tmp = None
         try:
-            copied = core.install_app_files(sd)
-            for path in copied:
-                self.q.put(("log", "  > installed %s" % path))
-            self.q.put(("log", "APP INSTALL COMPLETE - %d file(s) copied."
-                        % len(copied)))
-            self.q.put(("log", "Reboot the Pip-Boy after installing or updating."))
+            print("==== DEVICE INSTALL / UPDATE ====")
+            print("  > SD card root: %s" % cfg["sd_path"])
+
+            # 1. resolve the app files from the chosen source
+            if cfg.get("app_source") == "github":
+                files, tmp = core.download_app_files()
+            else:
+                src_dir = (cfg.get("app_source_dir") or "").strip() or core.PROJECT_ROOT
+                tag = "" if (cfg.get("app_source_dir") or "").strip() else "  (bundled)"
+                print("  > source: local folder %s%s" % (src_dir, tag))
+                files = core.find_app_files(src_dir)
+
+            # 2. copy them onto the card, reporting what actually changed
+            print("  > installing %d app file(s) ..." % len(files))
+            results = core.install_app_files(cfg["sd_path"], files)
+            for dest, rel, status, size in results:
+                print("  > %-9s %-22s %6d bytes" % (status.upper(), rel, size))
+            changed = sum(1 for r in results if r[2] != "unchanged")
+            print("  > app files: %d changed, %d unchanged -> %s"
+                  % (changed, len(results) - changed,
+                     os.path.dirname(os.path.dirname(results[0][0]))))
+
+            # 3. sync the latest weather payload alongside the app
+            print("  > fetching weather + NOAA SWPC space weather ...")
+            payload = core.build_payload(cfg)
+            if payload["locations"]:
+                core.write_payload(cfg, payload)
+                print("DEVICE UPDATE COMPLETE - app files plus %d location(s) cached."
+                      % len(payload["locations"]))
+                if not payload.get("space"):
+                    print("Space-weather endpoints were unavailable; weather data was still written.")
+                print("Reboot the Pip-Boy after installing or updating.")
+            else:
+                print("APP FILES INSTALLED, BUT WEATHER DATA WAS NOT UPDATED.")
+                print("Check your connection and run fetch again.")
         except Exception as e:
-            self.q.put(("log", "INSTALL ERROR: %s" % e))
+            print("INSTALL ERROR: %s" % e)
         finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+            sys.stdout = old
             self.q.put(("__install_done__", None))
 
     # ---------------------------------------------------------------- fetch
@@ -281,7 +400,7 @@ class App:
         self.update_output_label()
         self.fetching = True
         self.install_btn.configure(state="disabled")
-        self.fetch_btn.configure(state="disabled", text="… SYNCING …")
+        self.fetch_btn.configure(state="disabled", text=FETCH_BUSY_LABEL)
         threading.Thread(target=self._fetch_worker, daemon=True).start()
 
     def _fetch_worker(self):
@@ -315,7 +434,7 @@ class App:
                 if kind == "__done__":
                     self.fetching = False
                     self.fetch_btn.configure(state="normal",
-                                             text="▶  FETCH & SYNC TO SD")
+                                             text=FETCH_LABEL)
                     self.install_btn.configure(state="normal",
                                                text=INSTALL_LABEL)
                     self.fetch_btn.configure(text=FETCH_LABEL)

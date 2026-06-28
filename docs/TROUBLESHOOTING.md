@@ -59,6 +59,19 @@ Fix:
 
 3. Make sure the top-level object has a non-empty `locations` array.
 
+## Pip-Boy Shows ERROR Errors: CALLBACK, LOW_MEMORY, MEMORY
+
+The device ran out of Espruino runtime memory while loading or drawing the app.
+
+Fix:
+
+1. Install the current `APPS/WEATHER.JS`; it is sized to avoid the heavier
+   renderer path that triggered this error.
+2. Re-run the companion and sync again.
+3. If the app shows `DATA TOO LARGE`, remove saved locations and sync again.
+   The companion prints the generated cache size after each sync and warns when
+   it is too large for the on-device app.
+
 ## App Shows EMPTY DATA FILE
 
 The JSON parsed, but it had no usable locations.

@@ -1,590 +1,388 @@
-// ============================================================================
-//  PIP-OS WEATHER  -  Cached weather terminal for the Pip-Boy 3000
-//  Reads forecast data written to the SD card by the companion script.
-//  Displays current conditions + 5-day forecast for multiple locations.
-//
-//  CONTROLS
-//    Scroll wheel  (knob1 rotate) ... change location
-//    Thumbwheel    (knob2 rotate) ... switch view  (CURRENT <-> FORECAST)
-//    Scroll click  (knob1 click)  ... toggle view
-//    ITEMS button                 ... exit  (notDefault:true)
-//
-//  NOTE: per the RobCo 3000 docs, the in-scope graphics instance / font
-//  names can vary by firmware. This app resolves the graphics object
-//  defensively (h -> g) and falls back on fonts, so tweak the two
-//  helpers below if your firmware exposes different names.
-// ============================================================================
 (function() {
-
-  // --- Resolve the graphics instance (3000 example uses `h`, Mk V uses `g`) -
-  var G = (typeof h !== "undefined") ? h
-        : (typeof g !== "undefined") ? g
-        : null;
-
-  // Where the companion script writes data (first match wins)
-  var DATA_PATHS = ["USER/WEATHER.JSON", "WEATHER.JSON", "USER/WEATHER.json"];
-
-  // Flag the cache as stale once it is older than this many hours.
+  var G = (typeof h !== "undefined") ? h : (typeof g !== "undefined") ? g : null;
+  var P = (typeof Pip !== "undefined") ? Pip : null;
+  var PATHS = ["USER/WEATHER.JSON", "WEATHER.JSON", "USER/WEATHER.json"];
+  var MAX_DATA = 7000;
   var STALE_HOURS = 12;
+  var TABS = ["ATMOS", "5-DAY", "SOLAR"];
+  var CORN = 28; // horizontal inset for the top/bottom rows so the rounded
+                 // display corners do not clip the header/footer text.
+  var st = { d: null, e: null, l: 0, t: 0 };
 
-  var state = {
-    data: null,   // parsed payload
-    err:  null,   // error string if load failed
-    loc:  0,      // selected location index
-    tab:  0       // 0 = CURRENT, 1 = FORECAST
-  };
+  function gc() { try { if (global.gc) global.gc(); } catch (e) {} }
+  function W() { return G.getWidth ? G.getWidth() : 480; }
+  function H() { return G.getHeight ? G.getHeight() : 320; }
+  function num(v) { return v === undefined || v === null ? "--" : Math.round(v) + ""; }
+  function unit() { return st.d && st.d.units && st.d.units.temp || "F"; }
+  function cut(s, n) {
+    s = s === undefined || s === null ? "--" : "" + s;
+    return s.length > n ? s.substr(0, n) : s;
+  }
+  function font(n) {
+    try {
+      if (n === 3) { G.setFont("Monofonto23", 2); return; }
+      if (n === 2) { G.setFont("Monofonto23"); return; }
+      G.setFont("6x8", n === 1 ? 2 : 1);
+      return;
+    } catch (e) {}
+    try { G.setFontVector(n === 3 ? 54 : n === 2 ? 24 : n === 1 ? 16 : 8); return; } catch (e) {}
+    G.setFont("6x8", n === 3 ? 6 : n === 2 ? 3 : n === 1 ? 2 : 1);
+  }
+  function text(s, x, y, ax, ay) {
+    G.setFontAlign(ax === undefined ? 0 : ax, ay === undefined ? -1 : ay);
+    G.drawString(s, x, y);
+  }
+  function rep(ch, n) {
+    var s = "";
+    while (n-- > 0) s += ch;
+    return s;
+  }
+  function padHex(n) {
+    var s = Math.max(0, n).toString(16).toUpperCase();
+    return "0x" + rep("0", Math.max(0, 4 - s.length)) + s;
+  }
+  function locAddr() { return padHex(0xA100 + st.l * 0x23); }
+  function box(x0, y0, x1, y1, label) {
+    G.drawRect(x0, y0, x1, y1);
+    if (label) {
+      font(0);
+      G.clearRect(x0 + 7, y0, x0 + 15 + label.length * 6, y0 + 8);
+      text(" " + label + " ", x0 + 9, y0 - 1, -1, -1);
+    }
+  }
+  function gauge(x, y, w, v, max) {
+    var f;
+    G.drawRect(x, y, x + w, y + 6);
+    if (v === undefined || v === null || !isFinite(v)) return;
+    f = Math.max(0, Math.min(w - 2, Math.round((w - 2) * v / max)));
+    if (f > 0) G.fillRect(x + 1, y + 1, x + f, y + 5);
+  }
+  function scanMask() {
+    var y, w = W(), h = H();
+    for (y = 31; y < h - 26; y += 8) G.clearRect(8, y, w - 8, y);
+    G.drawRect(3, 3, w - 4, h - 4);
+  }
+  function hr(y) { G.drawLine(12, y, W() - 12, y); }
+  function stamp(s) {
+    if (!s) return "";
+    s = ("" + s).replace("T", " ");
+    return s.length >= 16 ? s.substr(5, 11) : s;
+  }
+  function ageHours() {
+    if (!st.d || !st.d.epoch) return null;
+    var a = (Date.now() / 1000 - st.d.epoch) / 3600;
+    return isFinite(a) && a >= 0 ? a : null;
+  }
+  function stale() {
+    var a = ageHours();
+    return a !== null && a > STALE_HOURS;
+  }
+  function ageLabel(a) {
+    if (a === null) return "?";
+    if (a < 1) return "<1H";
+    return a < 48 ? Math.round(a) + "H" : Math.round(a / 24) + "D";
+  }
 
-  var blinkOn = true;     // toggled by the stale-warning blink timer
-  var blinkTimer = null;
-
-  // ---------------------------------------------------------------- fonts ---
-  function fontBig() {
-    // Big numerals for the temperature
-    try { G.setFont("Monofonto23", 2); return; } catch (e) {}
-    try { G.setFontVector(54); return; } catch (e) {}
-    G.setFont("6x8", 6);
-  }
-  function fontHead() {
-    try { G.setFont("Monofonto23"); return; } catch (e) {}
-    try { G.setFontVector(24); return; } catch (e) {}
-    G.setFont("6x8", 3);
-  }
-  function fontSmall() {
-    try { G.setFont("6x8", 2); return; } catch (e) {}
-    G.setFont("6x8");
-  }
-  function fontTiny() {
-    try { G.setFont("6x8"); return; } catch (e) {}
-  }
-
-  // --------------------------------------------------------------- loading --
-  function loadData() {
-    state.data = null;
-    state.err = null;
-    var fs;
-    try { fs = require("fs"); } catch (e) { state.err = "NO FS MODULE"; return; }
-    var txt = null;
-    for (var i = 0; i < DATA_PATHS.length; i++) {
+  function load() {
+    st.d = null;
+    st.e = null;
+    var fs, txt = null, i;
+    try { fs = require("fs"); } catch (e) { st.e = "NO FS MODULE"; return; }
+    for (i = 0; i < PATHS.length; i++) {
       try {
-        txt = fs.readFileSync(DATA_PATHS[i]);
+        txt = fs.readFileSync(PATHS[i]);
         if (txt) break;
       } catch (e) { txt = null; }
     }
-    if (!txt) { state.err = "NO WEATHER DATA"; return; }
+    if (!txt) { st.e = "NO WEATHER DATA"; return; }
     try {
-      var d = JSON.parse(txt.toString());
-      if (!d || !d.locations || !d.locations.length) { state.err = "EMPTY DATA FILE"; return; }
-      state.data = d;
-      if (state.loc >= d.locations.length) state.loc = 0;
+      if (typeof txt !== "string") txt = "" + txt;
+      if (txt.length > MAX_DATA) {
+        st.e = "DATA TOO LARGE";
+        txt = null;
+        gc();
+        return;
+      }
+      var d = JSON.parse(txt);
+      txt = null;
+      gc();
+      if (!d || !d.locations || !d.locations.length) { st.e = "EMPTY DATA FILE"; return; }
+      st.d = d;
+      if (st.l >= d.locations.length) st.l = 0;
     } catch (e) {
-      state.err = "BAD DATA FORMAT";
-    }
-    refreshBlink();
-  }
-
-  // ----------------------------------------------------- stale tracking -----
-  // Returns the age of the cache in hours, or null if it can't be determined.
-  function dataAgeHours() {
-    if (!state.data || !state.data.epoch) return null;
-    var now = Date.now() / 1000;            // UTC epoch seconds (timezone-safe)
-    var age = (now - state.data.epoch) / 3600;
-    if (!isFinite(age) || age < 0) return null;  // bad/forward device clock
-    return age;
-  }
-  function isStale() {
-    var a = dataAgeHours();
-    return a !== null && a > STALE_HOURS;
-  }
-  function ageLabel(h) {
-    if (h === null) return "?";
-    if (h < 1) return "<1H";
-    if (h < 48) return Math.round(h) + "H";
-    return Math.round(h / 24) + "D";
-  }
-  function refreshBlink() {
-    if (isStale()) {
-      if (!blinkTimer) blinkTimer = setInterval(function () {
-        blinkOn = !blinkOn;
-        draw();
-      }, 700);
-    } else if (blinkTimer) {
-      clearInterval(blinkTimer);
-      blinkTimer = null;
-      blinkOn = true;
+      txt = null;
+      gc();
+      st.e = "BAD DATA FORMAT";
     }
   }
 
-  // ------------------------------------------------------ weather glyphs ----
-  // Simple vector icons drawn from primitives so they read at any palette.
-  function iconSun(cx, cy, r, night) {
-    if (night) {
-      // crescent moon
-      G.fillCircle(cx, cy, r * 0.65);
-      try { G.setColor(0); } catch (e) {}
-      G.fillCircle(cx + r * 0.35, cy - r * 0.25, r * 0.6);
-      try { G.setColor(1); } catch (e) {}
-      return;
-    }
-    G.fillCircle(cx, cy, r * 0.55);
-    var a;
-    for (a = 0; a < 8; a++) {
-      var ang = a * Math.PI / 4;
-      var sx = cx + Math.cos(ang) * r * 0.85;
-      var sy = cy + Math.sin(ang) * r * 0.85;
-      var ex = cx + Math.cos(ang) * r * 1.25;
-      var ey = cy + Math.sin(ang) * r * 1.25;
-      G.drawLine(sx, sy, ex, ey);
-    }
-  }
-  function iconCloud(cx, cy, r) {
-    G.fillCircle(cx - r * 0.55, cy + r * 0.15, r * 0.5);
-    G.fillCircle(cx + r * 0.55, cy + r * 0.15, r * 0.5);
-    G.fillCircle(cx, cy - r * 0.2, r * 0.6);
-    G.fillRect(cx - r * 0.95, cy + r * 0.15, cx + r * 0.95, cy + r * 0.6);
-  }
-  function iconRain(cx, cy, r) {
-    iconCloud(cx, cy - r * 0.25, r * 0.85);
-    var i;
-    for (i = -1; i <= 1; i++) {
-      var x = cx + i * r * 0.5;
-      G.drawLine(x, cy + r * 0.55, x - r * 0.18, cy + r * 1.05);
-    }
-  }
-  function iconSnow(cx, cy, r) {
-    iconCloud(cx, cy - r * 0.25, r * 0.85);
-    var i;
-    for (i = -1; i <= 1; i++) {
-      var x = cx + i * r * 0.5, y = cy + r * 0.8;
-      G.drawLine(x - 5, y, x + 5, y);
-      G.drawLine(x, y - 5, x, y + 5);
-      G.drawLine(x - 4, y - 4, x + 4, y + 4);
-      G.drawLine(x - 4, y + 4, x + 4, y - 4);
-    }
-  }
-  function iconStorm(cx, cy, r) {
-    iconCloud(cx, cy - r * 0.25, r * 0.85);
-    G.fillPoly([
-      cx,           cy + r * 0.4,
-      cx - r * 0.3, cy + r * 0.4,
-      cx,           cy + r * 0.95,
-      cx + r * 0.1, cy + r * 0.6,
-      cx + r * 0.35,cy + r * 0.6
-    ]);
-  }
-  function iconFog(cx, cy, r) {
-    var i;
-    for (i = 0; i < 4; i++) {
-      var y = cy - r * 0.6 + i * r * 0.45;
-      G.drawLine(cx - r * (i % 2 ? 0.7 : 1), y, cx + r * (i % 2 ? 1 : 0.7), y);
-    }
-  }
-  function iconPartly(cx, cy, r, night) {
-    iconSun(cx - r * 0.45, cy - r * 0.4, r * 0.65, night);
-    iconCloud(cx + r * 0.15, cy + r * 0.2, r * 0.8);
-  }
-
-  // map WMO weather code -> icon category
-  function drawIcon(code, cx, cy, r, isDay) {
-    var night = !isDay;
-    if (code === 0) return iconSun(cx, cy, r, night);
-    if (code === 1 || code === 2) return iconPartly(cx, cy, r, night);
-    if (code === 3) return iconCloud(cx, cy, r);
-    if (code === 45 || code === 48) return iconFog(cx, cy, r);
-    if (code >= 51 && code <= 67) return iconRain(cx, cy, r);
-    if (code >= 71 && code <= 77) return iconSnow(cx, cy, r);
-    if (code >= 80 && code <= 82) return iconRain(cx, cy, r);
-    if (code >= 85 && code <= 86) return iconSnow(cx, cy, r);
-    if (code >= 95) return iconStorm(cx, cy, r);
-    return iconCloud(cx, cy, r);
-  }
-
-  // ----------------------------------------------------------- drawing ------
-  function W() { return G.getWidth(); }
-  function H() { return G.getHeight(); }
-
-  function hr(y) {
-    G.drawLine(12, y, W() - 12, y);
-  }
-
-  function drawDegree(x, y, unit) {
-    // small degree ring + unit letter, placed at (x,y) baseline-ish
-    G.drawCircle(x + 5, y + 4, 4);
-    fontSmall();
-    G.setFontAlign(-1, 0);
-    G.drawString(unit || "F", x + 14, y + 6);
-  }
-
-  function drawHeader() {
-    var d = state.data;
-    var n = d ? d.locations.length : 0;
-    fontTiny();
-    if (!isStale()) {                 // banner reuses this space when stale
-      G.setFontAlign(-1, -1);
-      G.drawString("PIP-OS WEATHER MONITOR", 12, 4);
-    }
-    if (d) {
-      G.setFontAlign(1, -1);
-      G.drawString("[" + (state.loc + 1) + "/" + n + "]", W() - 12, 4);
-    }
+  function header() {
+    font(0);
+    if (st.d && stale()) text("! CACHE " + ageLabel(ageHours()) + " OLD - SYNC", CORN, 6, -1, -1);
+    else text("ROBCO INDUSTRIES (TM) TERMLINK", CORN, 6, -1, -1);
+    if (st.d) text("ATMOS [" + (st.l + 1) + "/" + st.d.locations.length + "]", W() - CORN, 6, 1, -1);
     hr(18);
   }
-
-  function drawFooter() {
-    var y = H() - 14;
+  function footer() {
+    var y = H() - 16;
     hr(y - 4);
-    fontTiny();
-    G.setFontAlign(-1, -1);
-    G.drawString("WHEEL:LOC  THUMB:VIEW  ITEMS:EXIT", 12, y);
-    if (state.data && state.data.generated) {
-      G.setFontAlign(1, -1);
-      var pre = isStale() ? "! STALE " : "UPD ";
-      G.drawString(pre + shortStamp(state.data.generated), W() - 12, y);
-    }
+    font(0);
+    text("WHEEL:SITE  THUMB:PAGE  ITEMS:EXIT", CORN, y, -1, -1);
+    if (st.d && st.d.generated) text((stale() ? "! " : "UPD ") + stamp(st.d.generated), W() - CORN, y, 1, -1);
   }
-
-  // Blinking warning shown (top-left, where the header label normally sits)
-  // when the cached data is older than STALE_HOURS.
-  function drawStaleBanner() {
-    if (!blinkOn) return;                  // blink off-phase: draw nothing
-    var x0 = 10, x1 = W() - 58, y0 = 1, y1 = 15;
-    G.drawRect(x0, y0, x1, y1);
-    G.drawRect(x0 + 1, y0 + 1, x1 - 1, y1 - 1);
-    fontTiny();
-    G.setFontAlign(0, 0);
-    G.drawString("! CACHED DATA " + ageLabel(dataAgeHours()) + " OLD - SYNC SOON !",
-      (x0 + x1) / 2, (y0 + y1) / 2);
+  function title(loc) {
+    font(1);
+    text(cut((loc.name || "UNKNOWN").toUpperCase(), 24), CORN, 24, -1, -1);
+    font(0);
+    if (loc.region) text(cut((loc.region || "").toUpperCase(), 30), CORN, 43, -1, -1);
+    text("SITE " + locAddr(), W() - CORN, 43, 1, -1);
   }
-
-  function shortStamp(s) {
-    // accept "YYYY-MM-DD HH:MM" or ISO; show "MM-DD HH:MM"
-    if (!s) return "";
-    s = ("" + s).replace("T", " ");
-    if (s.length >= 16) return s.substr(5, 11);
-    return s;
-  }
-
-  function tempUnit() {
-    return (state.data && state.data.units && state.data.units.temp) || "F";
-  }
-  function windUnit() {
-    return (state.data && state.data.units && state.data.units.wind) || "mph";
-  }
-
-  function drawLocationTitle(loc) {
-    fontHead();
-    G.setFontAlign(0, -1);
-    G.drawString(loc.name || "UNKNOWN", W() / 2, 18);
-    if (loc.region) {
-      fontTiny();
-      G.setFontAlign(0, -1);
-      G.drawString(loc.region, W() / 2, 42);
-    }
-  }
-
-  var TABS = ["CURRENT", "FORECAST", "SPACE WX"];
-
-  function drawTabs(active) {
-    var y = 56;
-    fontTiny();
-    var bw = (W() - 24) / TABS.length;
-    var i;
+  function tabs() {
+    var y = 58, bw = (W() - 24) / TABS.length, i, x, label;
+    font(0);
     for (i = 0; i < TABS.length; i++) {
-      var x0 = 12 + i * bw;
-      if (i === active) G.drawRect(x0 + 3, y, x0 + bw - 3, y + 15);
-      G.setFontAlign(0, 0);
-      G.drawString(TABS[i], x0 + bw / 2, y + 7);
+      x = 12 + i * bw;
+      if (i === st.t) G.drawRect(x + 2, y, x + bw - 2, y + 15);
+      label = (i === st.t ? "> " : "  ") + TABS[i];
+      text(label, x + bw / 2, y + 8, 0, 0);
     }
-    hr(76);
+    hr(77);
+  }
+  function msg(a, b) {
+    font(2);
+    text(a, W() / 2, H() / 2 - 18, 0, 0);
+    font(1);
+    if (b) text(b, W() / 2, H() / 2 + 20, 0, 0);
   }
 
-  // centered label-over-value cell (used in grids)
-  function drawStat(label, value, x, y, w) {
-    fontTiny();
-    G.setFontAlign(0, -1);
-    G.drawString(label, x + w / 2, y);
-    fontSmall();
-    G.setFontAlign(0, -1);
-    G.drawString(value, x + w / 2, y + 12);
+  function degree(x, y) {
+    G.drawCircle(x + 5, y + 4, 4);
+    font(1);
+    text(unit(), x + 14, y + 6, -1, 0);
   }
-
-  // single-line label (left) + value (right), for side panels
-  function drawStatRow(label, value, xL, xR, y) {
-    fontTiny();
-    G.setFontAlign(-1, 0);
-    G.drawString(label, xL, y);
-    fontSmall();
-    G.setFontAlign(1, 0);
-    G.drawString(value, xR, y);
-  }
-
-  function drawCurrent(loc) {
-    var c = loc.current || {};
-    var midY = 150;
-
-    // LEFT: condition icon + big temperature
-    drawIcon(c.code | 0, 84, midY, 40, c.is_day ? 1 : 0);
-    fontBig();
-    G.setFontAlign(1, 0);
-    var t = (c.temp === undefined ? "--" : Math.round(c.temp)) + "";
-    var tx = 286;
-    G.drawString(t, tx, midY);
-    drawDegree(tx, midY - 14, tempUnit());
-
-    // condition + solar/aurora tie-in, centered under the icon/temp
-    var lcx = 150;
-    fontSmall();
-    G.setFontAlign(0, -1);
-    G.drawString((c.desc || "--").toUpperCase(), lcx, midY + 52);
-    var sl = solarLine(loc);
-    if (sl) {
-      fontTiny();
-      G.setFontAlign(0, -1);
-      G.drawString(sl, lcx, midY + 74);
-    }
-
-    // RIGHT: stat panel
-    G.drawLine(300, 86, 300, 286);
-    var xL = 314, xR = W() - 14;
-    drawStatRow("FEELS", (c.feels === undefined ? "--" : Math.round(c.feels)) + tempUnit(), xL, xR, 116);
-    drawStatRow("WIND", (c.wind === undefined ? "--" : Math.round(c.wind)) + (c.dir ? " " + c.dir : ""), xL, xR, 154);
-    drawStatRow("HUMIDITY", (c.humidity === undefined ? "--" : Math.round(c.humidity)) + "%", xL, xR, 192);
-    drawStatRow("RAD (UV)", (c.uv === undefined ? "--" : Math.round(c.uv)) + "", xL, xR, 230);
-    fontTiny();
-    G.setFontAlign(0, -1);
-    if (c.time) G.drawString("OBSERVED " + shortStamp(c.time), (xL + xR) / 2, 258);
-  }
-
-  function drawForecast(loc) {
-    var days = loc.daily || [];
-    var n = Math.min(days.length, 5);
-    fontTiny();
-    G.setFontAlign(0, -1);
-    G.drawString("5-DAY FORECAST   (HI/LO  -  RAIN%)", W() / 2, 84);
-    var colW = (W() - 24) / 5;
-    var i;
-    for (i = 0; i < n; i++) {
-      var d = days[i];
-      var cx = 12 + colW * i + colW / 2;
-      if (i > 0) G.drawLine(12 + colW * i, 104, 12 + colW * i, 262);
-      // day label
-      fontSmall();
-      G.setFontAlign(0, -1);
-      G.drawString(d.d || ("D" + (i + 1)), cx, 108);
-      // icon
-      drawIcon(d.code | 0, cx, 162, 22, 1);
-      // hi / lo
-      var hi = (d.hi === undefined ? "--" : Math.round(d.hi));
-      var lo = (d.lo === undefined ? "--" : Math.round(d.lo));
-      fontSmall();
-      G.setFontAlign(0, -1);
-      G.drawString(hi + "/" + lo, cx, 202);
-      // precip chance
-      fontTiny();
-      G.setFontAlign(0, -1);
-      G.drawString((d.pop === undefined ? "--" : Math.round(d.pop)) + "%", cx, 228);
+  function sun(cx, cy, r) {
+    var i, a;
+    G.drawCircle(cx, cy, r);
+    for (i = 0; i < 8; i++) {
+      a = i * Math.PI / 4;
+      G.drawLine(cx + Math.cos(a) * (r + 4), cy + Math.sin(a) * (r + 4),
+        cx + Math.cos(a) * (r + 11), cy + Math.sin(a) * (r + 11));
     }
   }
-
-  // --- space-weather interpretation helpers --------------------------------
-  function flareLevel(cls) {
-    if (!cls) return 0;
-    var c = ("" + cls).charAt(0).toUpperCase();
-    return c === "X" ? 3 : c === "M" ? 2 : c === "C" ? 1 : 0;
+  function cloud(cx, cy, r) {
+    G.drawCircle(cx - r / 2, cy + 2, r / 2);
+    G.drawCircle(cx + r / 2, cy + 2, r / 2);
+    G.drawCircle(cx, cy - 4, r / 2 + 3);
+    G.drawLine(cx - r, cy + r / 2, cx + r, cy + r / 2);
   }
-  function scaleNum(s) {
-    if (!s) return 0;
-    var m = ("" + s).match(/\d+/);
-    return m ? parseInt(m[0], 10) : 0;
+  function wxIcon(code, cx, cy, r) {
+    var i, x;
+    code = code || 0;
+    if (code === 0) sun(cx, cy, r);
+    else if (code < 3) { sun(cx - r / 2, cy - r / 2, Math.max(5, r / 2)); cloud(cx + 4, cy + 3, r); }
+    else cloud(cx, cy, r);
+    if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
+      for (i = -1; i <= 1; i++) {
+        x = cx + i * 8;
+        G.drawLine(x, cy + r, x - 4, cy + r + 12);
+      }
+    } else if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) {
+      for (i = -1; i <= 1; i++) {
+        x = cx + i * 8;
+        G.drawLine(x - 4, cy + r + 6, x + 4, cy + r + 6);
+        G.drawLine(x, cy + r + 2, x, cy + r + 10);
+      }
+    } else if (code >= 95) {
+      G.drawLine(cx, cy + r - 3, cx - 8, cy + r + 15);
+      G.drawLine(cx - 8, cy + r + 15, cx + 3, cy + r + 8);
+      G.drawLine(cx + 3, cy + r + 8, cx - 2, cy + r + 23);
+    } else if (code === 45 || code === 48) {
+      for (i = 0; i < 3; i++) G.drawLine(cx - r, cy + r + i * 6, cx + r, cy + r + i * 6);
+    }
   }
-  function solarActive(sp) {
-    if (!sp) return false;
-    return flareLevel(sp.flare) >= 2 || scaleNum(sp.g_scale) >= 1 ||
-           scaleNum(sp.s_scale) >= 1 || scaleNum(sp.r_scale) >= 1;
+  function rowAt(label, val, xL, xR, y) {
+    font(0);
+    text(label, xL, y, -1, 0);
+    font(1);
+    text(val, xR, y, 1, 0);
   }
-  // Compact one-liner shown on the CURRENT view so space wx ties into weather.
+  function row(label, val, y) {
+    rowAt(label, val, 258, W() - 14, y);
+  }
   function solarLine(loc) {
-    var sp = state.data.space;
-    if (!sp) return null;
-    var s;
-    if (solarActive(sp)) {
-      s = "SOLAR " + (sp.flare || "ACTIVE");
-      if (scaleNum(sp.g_scale) >= 1) s += " / " + sp.g_scale;
-      else if (scaleNum(sp.s_scale) >= 1) s += " / " + sp.s_scale;
-    } else {
-      s = "SOLAR QUIET";
-    }
-    var au = loc.aurora;
-    if (au && au.chance && au.chance !== "UNLIKELY") s += "   AURORA " + au.chance;
+    var sp = st.d.space, au = loc.aurora, s;
+    if (!sp) return "";
+    s = "SOLAR " + (sp.flare || "QUIET");
+    if (sp.g_scale && sp.g_scale !== "G0") s += " " + sp.g_scale;
+    if (au && au.chance && au.chance !== "UNLIKELY") s += "  AURORA " + au.chance;
     return s;
   }
+  function current(loc) {
+    var c = loc.current || {}, d0 = (loc.daily && loc.daily[0]) || {};
+    box(14, 88, 236, 255, "LOCAL ATMOS");
+    box(248, 88, W() - 14, 255, "INSTRUMENTS");
 
-  // 3-day planetary Kp bar graph with a per-location aurora threshold line.
-  function drawKpGraph(sp, loc, x0, y0, x1, y1) {
-    var kpf = sp.kpf || [];
-    var base = y1;                          // Kp=0 baseline
-    var span = y1 - y0;                     // pixels for Kp 0..9
-    function ky(kp) { return base - (Math.max(0, Math.min(9, kp)) / 9) * span; }
-    // axis + Kp gridlines (3/6/9)
+    wxIcon(c.code, 70, 135, 24);
+    font(3);
+    G.setFontAlign(-1, 0);
+    G.drawString(num(c.temp), 118, 145);
+    degree(205, 124);
+
+    font(0);
+    text("> CONDITION", 24, 184, -1, -1);
+    font(1);
+    text(cut((c.desc || "--").toUpperCase(), 18), 24, 203, -1, -1);
+    font(0);
+    text("HI/LO " + (d0.hi === undefined ? "--" : Math.round(d0.hi)) + "/" +
+      (d0.lo === undefined ? "--" : Math.round(d0.lo)) + "  RAIN " +
+      (d0.pop === undefined ? "--" : Math.round(d0.pop)) + "%", 24, 228, -1, -1);
+    if (c.time) text("OBS " + stamp(c.time), 24, 243, -1, -1);
+
+    rowAt("FEELS", num(c.feels) + unit(), 260, W() - 26, 112);
+    rowAt("WIND", num(c.wind) + (c.dir ? " " + c.dir : ""), 260, W() - 26, 146);
+    rowAt("HUMID", num(c.humidity) + "%", 260, W() - 26, 180);
+    gauge(260, 192, W() - 286, c.humidity, 100);
+    rowAt("RAD UV", num(c.uv), 260, W() - 26, 220);
+    gauge(260, 232, W() - 286, c.uv, 11);
+
+    box(14, 262, W() - 14, 286, "RELAY");
+    font(0);
+    text(cut(solarLine(loc) || "SOLAR RELAY UNAVAILABLE", 58), 24, 274, -1, 0);
+  }
+
+  function forecast(loc) {
+    var days = loc.daily || [], n = Math.min(days.length, 5), cw = (W() - 24) / 5;
+    var i, d, x, cx, hi, lo;
+    box(14, 88, W() - 14, 286, "FORECAST BUFFER");
+    font(0);
+    text("5 ENTRIES  //  HI/LO  //  PRECIP CHANCE", 26, 103, -1, -1);
+    for (i = 0; i < n; i++) {
+      d = days[i] || {};
+      x = 12 + i * cw;
+      cx = x + cw / 2;
+      if (i > 0) G.drawLine(x, 126, x, 274);
+      font(0);
+      text(padHex(0xB000 + i * 0x10), cx, 119, 0, -1);
+      font(1);
+      text(d.d || ("D" + (i + 1)), cx, 138, 0, -1);
+      wxIcon(d.code, cx, 166, 17);
+      font(0);
+      text(cut((d.desc || "--").toUpperCase(), 10), cx, 198, 0, -1);
+      hi = d.hi === undefined ? "--" : Math.round(d.hi);
+      lo = d.lo === undefined ? "--" : Math.round(d.lo);
+      font(1);
+      text(hi + "/" + lo, cx, 218, 0, -1);
+      font(0);
+      text((d.pop === undefined ? "--" : Math.round(d.pop)) + "%", cx, 246, 0, -1);
+      gauge(x + 13, 263, cw - 26, d.pop, 100);
+    }
+  }
+
+  function kpGraph(sp, loc, x0, y0, x1, y1) {
+    var k = sp.kpf || [], base = y1, span = y1 - y0, need = 99;
+    var i, bw, v, y, bx0, bx1, ty, dx;
+    if (!k.length) return;
+    if (loc.aurora && loc.aurora.needed !== undefined) need = loc.aurora.needed;
     G.drawLine(x0, y0, x0, y1);
     G.drawLine(x0, y1, x1, y1);
-    fontTiny();
-    var gl, glv = [3, 6, 9];
-    for (gl = 0; gl < 3; gl++) {
-      var gy = ky(glv[gl]);
-      G.setFontAlign(1, 0);
-      G.drawString(glv[gl] + "", x0 - 2, gy);
+    bw = (x1 - x0) / k.length;
+    for (i = 0; i < k.length; i++) {
+      v = Math.max(0, Math.min(9, k[i]));
+      y = base - v / 9 * span;
+      bx0 = x0 + i * bw + 1;
+      bx1 = x0 + (i + 1) * bw - 1;
+      if (k[i] >= need) G.fillRect(bx0, y, bx1, base - 1);
+      else G.drawRect(bx0, y, bx1, base - 1);
     }
-    // bars - filled when Kp reaches this location's aurora threshold
-    var needed = (loc.aurora && loc.aurora.needed !== undefined) ? loc.aurora.needed : 99;
-    var n = kpf.length || 1;
-    var bw = (x1 - x0) / n;
-    var i;
-    for (i = 0; i < kpf.length; i++) {
-      var bx0 = x0 + i * bw + 1, bx1 = x0 + (i + 1) * bw - 1;
-      var by = ky(kpf[i]);
-      if (kpf[i] >= needed) G.fillRect(bx0, by, bx1, base - 1);
-      else G.drawRect(bx0, by, bx1, base - 1);
-    }
-    // aurora threshold (dashed) - the tie to THIS location
-    if (needed <= 9) {
-      var ty = ky(needed), dx;
-      for (dx = x0; dx < x1; dx += 6) G.drawLine(dx, ty, dx + 3, ty);
-      fontTiny();
-      G.setFontAlign(-1, -1);
-      G.drawString("AURORA Kp" + needed, x0 + 3, y0 - 1);
-    }
-    // day ticks
-    var ticks = sp.kpf_ticks || [];
-    for (i = 0; i < ticks.length; i++) {
-      var tx = x0 + ticks[i].i * bw;
-      G.drawLine(tx, base, tx, base + 3);
-      fontTiny();
-      G.setFontAlign(0, -1);
-      G.drawString(ticks[i].d, tx, base + 4);
+    if (need <= 9) {
+      ty = base - need / 9 * span;
+      for (dx = x0; dx < x1; dx += 8) G.drawLine(dx, ty, dx + 4, ty);
     }
   }
-
-  function drawSpace(loc) {
-    var sp = state.data.space;
-    if (!sp) {
-      fontSmall();
-      G.setFontAlign(0, 0);
-      G.drawString("NO SPACE WX DATA", W() / 2, H() / 2 - 10);
-      fontTiny();
-      G.drawString("RE-SYNC WITH COMPANION", W() / 2, H() / 2 + 16);
-      return;
-    }
-    // --- LEFT COLUMN: solar scales + planetary Kp -------------------------
-    fontTiny();
-    G.setFontAlign(-1, -1);
-    G.drawString("SOLAR ACTIVITY", 14, 84);
-    var cw = (228 - 12) / 2;
-    drawStat("FLARE", (sp.flare || "NONE"), 12, 104, cw);
-    drawStat("R-SCALE", (sp.r_scale || "R0"), 12 + cw, 104, cw);
-    drawStat("S-SCALE", (sp.s_scale || "S0"), 12, 150, cw);
-    drawStat("G-SCALE", (sp.g_scale || "G0"), 12 + cw, 150, cw);
-    fontSmall();
-    G.setFontAlign(-1, -1);
-    G.drawString("PLANETARY Kp " + (sp.kp_now === undefined ? "--" : sp.kp_now), 14, 196);
-    fontTiny();
-    G.setFontAlign(-1, -1);
-    G.drawString((sp.g_text ? sp.g_text.toUpperCase() : "FIELD QUIET"), 14, 216);
-
-    // --- RIGHT COLUMN: 3-day Kp graph (with this location's threshold) ----
-    G.drawLine(244, 84, 244, 248);
-    fontTiny();
-    G.setFontAlign(-1, -1);
-    G.drawString("Kp 3-DAY FORECAST", 252, 84);
-    drawKpGraph(sp, loc, 274, 104, W() - 14, 226);
-
-    // --- BOTTOM: aurora verdict for this location -------------------------
-    var au = loc.aurora || {};
-    hr(250);
-    fontTiny();
-    G.setFontAlign(-1, 0);
-    G.drawString("AURORA @ " + (loc.name || ""), 14, 264);
-    fontHead();
-    G.setFontAlign(1, 0);
-    G.drawString((au.chance || "UNKNOWN"), W() - 14, 264);
-    fontTiny();
-    G.setFontAlign(-1, -1);
-    if (au.needed !== undefined) {
-      G.drawString("NEEDS Kp " + au.needed + "   PEAK Kp " +
-        (au.maxkp === undefined ? "?" : au.maxkp), 14, 282);
-    }
-  }
-
-  function drawMessage(msg, sub) {
-    fontHead();
-    G.setFontAlign(0, 0);
-    G.drawString(msg, W() / 2, H() / 2 - 16);
-    fontSmall();
-    G.setFontAlign(0, 0);
-    if (sub) G.drawString(sub, W() / 2, H() / 2 + 20);
+  function space(loc) {
+    var sp = st.d.space, au = loc.aurora || {};
+    if (!sp) { msg("NO SPACE DATA", "SYNC COMPANION"); return; }
+    box(14, 88, 238, 240, "ROBCO SOLAR RELAY");
+    box(250, 88, W() - 14, 240, "KP BUFFER");
+    font(0);
+    rowAt("FLARE", sp.flare || "NONE", 26, 226, 114);
+    rowAt("R/S/G", (sp.r_scale || "R0") + " " + (sp.s_scale || "S0") + " " + (sp.g_scale || "G0"), 26, 226, 150);
+    rowAt("KP NOW/PK", (sp.kp_now === undefined ? "--" : sp.kp_now) + " / " + (sp.kp_peak === undefined ? "--" : sp.kp_peak), 26, 226, 186);
+    font(0);
+    text(cut((sp.g_text || "FIELD QUIET").toUpperCase(), 25), 26, 220, -1, -1);
+    text("3-DAY PLANETARY K-INDEX", 262, 106, -1, -1);
+    kpGraph(sp, loc, 286, 124, W() - 26, 222);
+    box(14, 250, W() - 14, 294, "AURORA ESTIMATE");
+    font(0);
+    text("AURORA @ " + cut((loc.name || "").toUpperCase(), 18), 24, 268, -1, 0);
+    font(2);
+    text(au.chance || "UNKNOWN", W() - 24, 268, 1, 0);
+    font(0);
+    if (au.needed !== undefined) text("NEEDS KP " + au.needed + "  PEAK KP " + (au.maxkp === undefined ? "?" : au.maxkp), 24, 280, -1, -1);
   }
 
   function draw() {
     G.reset().clear();
-    drawHeader();
-
-    if (state.err || !state.data) {
-      drawMessage(state.err || "NO DATA",
-        "RUN THE COMPANION APP TO SYNC");
-      fontTiny();
-      G.setFontAlign(0, -1);
-      G.drawString("EXPECTED: USER/WEATHER.JSON", W() / 2, H() / 2 + 50);
+    header();
+    if (st.e || !st.d) {
+      msg(st.e || "NO DATA", "RUN COMPANION SYNC");
+      font(0);
+      text("EXPECTED: USER/WEATHER.JSON", W() / 2, H() / 2 + 52, 0, -1);
+      scanMask();
       return;
     }
-
-    var loc = state.data.locations[state.loc];
-    drawLocationTitle(loc);
-    drawTabs(state.tab);
-    if (state.tab === 0) drawCurrent(loc);
-    else if (state.tab === 1) drawForecast(loc);
-    else drawSpace(loc);
-    if (isStale()) drawStaleBanner();
-    drawFooter();
+    var loc = st.d.locations[st.l] || {};
+    title(loc);
+    tabs();
+    if (st.t === 0) current(loc);
+    else if (st.t === 1) forecast(loc);
+    else space(loc);
+    footer();
+    scanMask();
   }
-
-  // ------------------------------------------------------------- input ------
-  function click() {
-    try { Pip.knob1Click && Pip.knob1Click(0); } catch (e) {}
-    try { Pip.audioBuiltin && Pip.audioBuiltin("CLICK"); } catch (e) {}
-  }
-
-  function onKnob1(dir) {
-    if (!state.data) { if (dir === 0) loadData(); draw(); return; }
-    var n = state.data.locations.length;
-    if (dir === 0) {            // click advances the view
-      state.tab = (state.tab + 1) % TABS.length;
-    } else {
-      state.loc = (state.loc + dir + n) % n;
+  function redraw() {
+    try { draw(); }
+    catch (e) {
+      gc();
+      try {
+        G.reset().clear();
+        msg("DISPLAY ERROR", "REBOOT OR RESYNC");
+      } catch (ignore) {}
     }
-    click();
-    draw();
   }
-
-  function onKnob2(dir) {
+  function click() {
+    try { if (P && P.knob1Click) P.knob1Click(0); } catch (e) {}
+    try { if (P && P.audioBuiltin) P.audioBuiltin("CLICK"); } catch (e) {}
+  }
+  function knob1(dir) {
+    if (!st.d) { if (dir === 0) load(); redraw(); return; }
+    if (dir === 0) st.t = (st.t + 1) % TABS.length;
+    else st.l = (st.l + dir + st.d.locations.length) % st.d.locations.length;
+    click();
+    redraw();
+  }
+  function knob2(dir) {
     if (dir === 0) return;
-    state.tab = (state.tab + dir + TABS.length) % TABS.length;
+    st.t = (st.t + dir + TABS.length) % TABS.length;
     click();
-    draw();
+    redraw();
   }
 
-  // ------------------------------------------------------------- boot --------
-  Pip.on("knob1", onKnob1);
-  Pip.on("knob2", onKnob2);
-  loadData();
-  draw();
+  if (P) {
+    P.on("knob1", knob1);
+    P.on("knob2", knob2);
+  }
+  load();
+  redraw();
 
   return {
     id: "WEATHER",
     notDefault: true,
     fullscreen: true,
-    remove: function () {
-      if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
-      Pip.removeListener("knob1", onKnob1);
-      Pip.removeListener("knob2", onKnob2);
+    remove: function() {
+      if (!P) return;
+      P.removeListener("knob1", knob1);
+      P.removeListener("knob2", knob2);
     }
   };
 })
