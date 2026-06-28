@@ -1,6 +1,6 @@
 {
     "id": "weather",
-    "name": "Weather",
+    "name": "RobCo Weather",
     "version": "1.0.0",
     "files": "APPS/WEATHER.JS,APPINFO/WEATHER.info,APPINFO/WEATHER.IMG,USER/WEATHER.JSON",
     "src": "APPS/WEATHER.JS",

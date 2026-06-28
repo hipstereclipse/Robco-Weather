@@ -107,7 +107,7 @@ Reboot the Pip-Boy after removal so the app list refreshes.
 
 A working install has all of these behaviors:
 
-- `Weather` appears in `ITEMS > MISC`.
+- `RobCo Weather` appears in `ITEMS > MISC`.
 - Opening the app shows the first saved location.
 - The scroll wheel changes location.
 - The thumbwheel changes between `ATMOS`, `5-DAY`, and `SOLAR`.

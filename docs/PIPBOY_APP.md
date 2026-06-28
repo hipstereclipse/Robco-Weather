@@ -15,7 +15,7 @@ pipboy/APPINFO/WEATHER.info
 It registers:
 
 - App id: `weather`
-- Menu name: `Weather`
+- Menu name: `RobCo Weather`
 - Source: `APPS/WEATHER.JS`
 - Icon: `APPINFO/WEATHER.IMG`
 - Required data file: `USER/WEATHER.JSON`
