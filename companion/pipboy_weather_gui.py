@@ -20,6 +20,7 @@
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -140,7 +141,13 @@ def rd(v):
 def kp_label(sp, i):
     labels = (sp or {}).get("kpt") or []
     if 0 <= i < len(labels) and labels[i]:
-        return str(labels[i]).upper()
+        s = str(labels[i])
+        m = re.match(r"^(\d\d/\d\d)[ T](\d\d)(?::\d\d)?Z?$", s, re.I)
+        if m:
+            h = int(m.group(2))
+            return "%s %d %s UTC" % (
+                m.group(1), h % 12 or 12, "PM" if h >= 12 else "AM")
+        return re.sub(r"Z$", " UTC", s, flags=re.I).upper()
     return "T+%dH" % (i * 3)
 
 
@@ -307,6 +314,10 @@ class DeviceCanvas(tk.Canvas):
         self.text(label, xL, y, F_TINY, ax=-1, ay=0, fill=DDIM)
         self.text(value, xR, y, F_SMALL, ax=1, ay=0)
 
+    def metric(self, label, value, x, y):
+        self.text(label, x, y, F_TINY, ax=0, fill=DDIM)
+        self.text(value, x, y + 17, F_SMALL, ax=0, ay=0)
+
     def msg(self, a, b=None):
         self.text(a, DEV_W / 2, DEV_H / 2 - 18, F_HEAD, ax=0, ay=0)
         if b:
@@ -436,11 +447,12 @@ class DeviceCanvas(tk.Canvas):
         self.text(unit, 205 + 14, 124 + 6, F_TINY, ax=-1, ay=0)
 
         self.text("> CONDITION", 24, 184, F_TINY, fill=DDIM)
-        self.text((c.get("desc") or "--").upper()[:18], 24, 203, F_SMALL)
-        self.text("HI/LO %s/%s  RAIN %s%%" % (rd(d0.get("hi")), rd(d0.get("lo")),
-                  rd(d0.get("pop"))), 24, 228, F_TINY)
         if c.get("time"):
-            self.text("OBS " + stamp(c["time"]), 24, 243, F_TINY, fill=DDIM)
+            self.text("OBS " + stamp(c["time"]), 226, 184, F_TINY, ax=1, fill=DDIM)
+        self.text((c.get("desc") or "--").upper()[:18], 24, 203, F_SMALL)
+        self.metric("HI", rd(d0.get("hi")), 52, 224)
+        self.metric("LO", rd(d0.get("lo")), 114, 224)
+        self.metric("RAIN", rd(d0.get("pop")) + "%", 186, 224)
 
         xL, xR = 260, DEV_W - 26
         rows = [(104, 126), (138, 160), (172, 200), (212, 240)]
@@ -501,7 +513,7 @@ class DeviceCanvas(tk.Canvas):
 
     def kp_graph(self, sp, loc, x0, y0, x1, y1, selected=0):
         kpf = sp.get("kpf", []) or []
-        base, span = y1, y1 - y0
+        base, span = y1, y1 - (y0 + 5)
 
         def ky(kp):
             return base - (max(0, min(9, kp)) / 9.0) * span
@@ -532,7 +544,6 @@ class DeviceCanvas(tk.Canvas):
             while dx < x1:
                 self.line(dx, ty, dx + 3, ty, fill=DHOT)
                 dx += 6
-            self.text("AURORA Kp%d" % needed, x0 + 3, y0 - 1, F_TINY, fill=DHOT)
         for tk_ in sp.get("kpf_ticks", []) or []:
             tx = x0 + tk_["i"] * bw
             self.line(tx, base, tx, base + 3)

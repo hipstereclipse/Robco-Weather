@@ -197,7 +197,13 @@ def pad_hex(n):
 def kp_label(sp, i):
     labels = (sp or {}).get("kpt") or []
     if 0 <= i < len(labels) and labels[i]:
-        return str(labels[i]).upper()
+        s = str(labels[i])
+        m = re.match(r"^(\d\d/\d\d)[ T](\d\d)(?::\d\d)?Z?$", s, re.I)
+        if m:
+            h = int(m.group(2))
+            return "%s %d %s UTC" % (
+                m.group(1), h % 12 or 12, "PM" if h >= 12 else "AM")
+        return re.sub(r"Z$", " UTC", s, flags=re.I).upper()
     return "T+%dH" % (i * 3)
 
 
@@ -284,6 +290,11 @@ def stat_row(g, label, value, xL, xR, y):
     g.text(value, xR, y, F_SMALL, ax=1, ay=0)
 
 
+def metric(g, label, value, x, y):
+    g.text(label, x, y, F_TINY, ax=0, fill=DIM)
+    g.text(value, x, y + 17, F_SMALL, ax=0, ay=0)
+
+
 def flare_level(cls):
     return {"X": 3, "M": 2, "C": 1}.get(str(cls)[:1].upper(), 0) if cls else 0
 
@@ -331,12 +342,12 @@ def view_current(g, data, loc, item_i=0):
     g.text(unit, 205 + 14, 124 + 6, F_TINY, ax=-1, ay=0)
 
     g.text("> CONDITION", 24, 181, F_TINY, fill=DIM)
-    g.text(c.get("desc", "--").upper()[:18], 24, 199, F_SMALL)
-    g.text("HI/LO %s/%s  RAIN %s%%" % (round(d0.get("hi", 0)),
-           round(d0.get("lo", 0)), round(d0.get("pop", 0))), 24, 219,
-           F_TINY, fill=FG)
     if c.get("time"):
-        g.text("OBS " + c["time"][5:], 24, 231, F_TINY, fill=DIM)
+        g.text("OBS " + c["time"][5:16], 226, 181, F_TINY, ax=1, fill=DIM)
+    g.text(c.get("desc", "--").upper()[:18], 24, 199, F_SMALL)
+    metric(g, "HI", str(round(d0.get("hi", 0))), 52, 216)
+    metric(g, "LO", str(round(d0.get("lo", 0))), 114, 216)
+    metric(g, "RAIN", "%s%%" % round(d0.get("pop", 0)), 186, 216)
 
     xL, xR = 262, LW - 26
     rows = [(104, 127), (134, 157), (164, 193), (202, 233)]
@@ -392,7 +403,7 @@ def view_forecast(g, data, loc, item_i=0):
 
 def kp_graph(g, sp, loc, x0, y0, x1, y1, item_i=0):
     kpf = sp.get("kpf", [])
-    base, span = y1, y1 - y0
+    base, span = y1, y1 - (y0 + 5)
 
     def ky(kp):
         return base - (max(0, min(9, kp)) / 9) * span
@@ -423,7 +434,6 @@ def kp_graph(g, sp, loc, x0, y0, x1, y1, item_i=0):
         while dx < x1:
             g.line(dx, ty, dx + 3, ty, fill=HOT)
             dx += 6
-        g.text("AURORA Kp%d" % needed, x0 + 3, y0 - 1, F_TINY, fill=HOT)
     for tk in sp.get("kpf_ticks", []):
         tx = x0 + tk["i"] * bw
         g.line(tx, base, tx, base + 3)

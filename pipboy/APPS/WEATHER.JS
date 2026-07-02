@@ -71,7 +71,19 @@
     return s.length >= 16 ? s.substr(5, 11) : s;
   }
   function kpLabel(sp, i) {
-    if (sp && sp.kpt && sp.kpt[i]) return ("" + sp.kpt[i]).toUpperCase();
+    var s, m, h, ap;
+    if (sp && sp.kpt && sp.kpt[i]) {
+      s = "" + sp.kpt[i];
+      m = s.match(/^(\d\d\/\d\d)[ T](\d\d)(?::\d\d)?Z?$/i);
+      if (m) {
+        h = +m[2];
+        ap = h >= 12 ? "PM" : "AM";
+        h = h % 12;
+        if (h === 0) h = 12;
+        return m[1] + " " + h + " " + ap + " UTC";
+      }
+      return s.replace(/Z$/i, " UTC").toUpperCase();
+    }
     return "T+" + (i * 3) + "H";
   }
   function ageHours() {
@@ -251,6 +263,12 @@
     font(1);
     text(val, xR, y, 1, 0);
   }
+  function metricAt(label, val, x, y) {
+    font(0);
+    text(label, x, y, 0, -1);
+    font(1);
+    text(val, x, y + 17, 0, 0);
+  }
   function solarLine(loc) {
     var sp = st.d.space, au = loc.aurora, s;
     if (!sp) return "";
@@ -272,13 +290,12 @@
 
     font(0);
     text("> CONDITION", 24, 181, -1, -1);
+    if (c.time) text("OBS " + stamp(c.time), 226, 181, 1, -1);
     font(1);
     text(cut((c.desc || "--").toUpperCase(), 18), 24, 199, -1, -1);
-    font(0);
-    text("HI/LO " + (d0.hi === undefined ? "--" : Math.round(d0.hi)) + "/" +
-      (d0.lo === undefined ? "--" : Math.round(d0.lo)) + "  RAIN " +
-      (d0.pop === undefined ? "--" : Math.round(d0.pop)) + "%", 24, 219, -1, -1);
-    if (c.time) text("OBS " + stamp(c.time), 24, 231, -1, -1);
+    metricAt("HI", num(d0.hi), 52, 216);
+    metricAt("LO", num(d0.lo), 114, 216);
+    metricAt("RAIN", (d0.pop === undefined ? "--" : Math.round(d0.pop)) + "%", 186, 216);
 
     hilite(254, 104, W() - 20, 127, st.t === 0 && st.a === 0);
     rowAt("FEELS", num(c.feels) + unit(), 262, W() - 26, 116);
@@ -334,7 +351,7 @@
   }
 
   function kpGraph(sp, loc, x0, y0, x1, y1) {
-    var k = sp.kpf || [], base = y1, span = y1 - y0, need = 99;
+    var k = sp.kpf || [], base = y1, top = y0 + 5, span = y1 - top, need = 99;
     var i, bw, v, y, bx0, bx1, ty, dx, tk, tx;
     if (!k.length) return;
     if (loc.aurora && loc.aurora.needed !== undefined) need = loc.aurora.needed;
